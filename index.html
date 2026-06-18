@@ -162,7 +162,7 @@
                 <div class="bg-indigo-600 p-2 rounded-lg"><i class="fa-solid fa-shield-halved text-lg"></i></div>
                 <div>
                     <h1 class="font-bold text-lg leading-tight">Super Admin Console</h1>
-                    <span class="text-xs text-slate-400">Manage institutes & student limits</span>
+                    <span class="text-xs text-slate-400">Approve institutes & manage student limits</span>
                 </div>
             </div>
             <button onclick="doSignOut()" class="text-sm bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg cursor-pointer"><i class="fa-solid fa-right-from-bracket mr-1"></i> Sign out</button>
@@ -179,9 +179,10 @@
                             <tr>
                                 <th class="text-left px-6 py-3 font-semibold">Institute</th>
                                 <th class="text-left px-6 py-3 font-semibold">Email</th>
+                                <th class="text-center px-6 py-3 font-semibold">Status</th>
                                 <th class="text-center px-6 py-3 font-semibold">Used</th>
                                 <th class="text-center px-6 py-3 font-semibold">Limit</th>
-                                <th class="text-center px-6 py-3 font-semibold">Action</th>
+                                <th class="text-center px-6 py-3 font-semibold">Actions</th>
                             </tr>
                         </thead>
                         <tbody id="sa-rows" class="divide-y divide-slate-100"></tbody>
@@ -190,6 +191,30 @@
                 <div id="sa-empty" class="hidden p-8 text-center text-slate-400 text-sm">No institutes registered yet.</div>
             </div>
         </main>
+    </div>
+
+    <!-- ============================================================= -->
+    <!--  PENDING / SUSPENDED SCREEN (institute awaiting approval)     -->
+    <!-- ============================================================= -->
+    <div id="pending-screen" class="hidden min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-900 p-4">
+        <div class="w-full max-w-md bg-white rounded-2xl shadow-2xl p-8 text-center">
+            <div class="mx-auto mb-5 w-20 h-20 rounded-full bg-amber-50 flex items-center justify-center">
+                <i id="pending-icon" class="fa-solid fa-hourglass-half text-3xl text-amber-500"></i>
+            </div>
+            <h2 id="pending-title" class="text-xl font-bold text-slate-800 mb-1">Awaiting approval</h2>
+            <p id="pending-inst-name" class="text-sm font-semibold text-indigo-600 mb-3">Your institute</p>
+            <p id="pending-msg" class="text-sm text-slate-500 leading-relaxed mb-6">
+                Your institute has been registered and is waiting for the Super Admin to approve it.
+            </p>
+            <div class="flex items-center justify-center space-x-3">
+                <button onclick="refreshPendingStatus()" class="bg-indigo-600 text-white font-semibold text-sm px-5 py-2.5 rounded-lg shadow-md cursor-pointer hover:bg-indigo-700">
+                    <i class="fa-solid fa-rotate mr-1"></i> Check again
+                </button>
+                <button onclick="doSignOut()" class="bg-slate-200 text-slate-700 font-semibold text-sm px-5 py-2.5 rounded-lg cursor-pointer hover:bg-slate-300">
+                    Sign out
+                </button>
+            </div>
+        </div>
     </div>
 
     <!-- ============================================================= -->
@@ -531,7 +556,7 @@
         }
 
         function showScreen(name) {
-            ['auth-screen', 'app-screen', 'superadmin-screen'].forEach(id => {
+            ['auth-screen', 'app-screen', 'superadmin-screen', 'pending-screen'].forEach(id => {
                 document.getElementById(id).classList.add('hidden');
             });
             document.getElementById(name).classList.remove('hidden');
@@ -705,19 +730,57 @@
             if (prof.role === 'super_admin') {
                 showScreen('superadmin-screen');
                 await loadSuperAdmin();
-            } else {
-                showScreen('app-screen');
-                await loadInstituteApp();
+                return;
             }
+
+            // Institute admin: load institute and check approval status before granting access.
+            const { data: inst, error: ierr } = await sb.from('institutes')
+                .select('*').eq('id', prof.institute_id).maybeSingle();
+            if (ierr || !inst) {
+                showScreen('auth-screen'); showAuthView('signin');
+                showAuthMsg('error', 'Could not load your institute. Please contact the Super Admin.');
+                return;
+            }
+            currentInstitute = inst;
+
+            if (inst.status !== 'active') {
+                showPendingScreen(inst);
+                return;
+            }
+
+            showScreen('app-screen');
+            await loadInstituteApp();
+        }
+
+        function showPendingScreen(inst) {
+            showScreen('pending-screen');
+            document.getElementById('pending-inst-name').innerText = inst.name || 'Your institute';
+            const isSuspended = inst.status === 'suspended';
+            document.getElementById('pending-title').innerText =
+                isSuspended ? 'Access suspended' : 'Awaiting approval';
+            document.getElementById('pending-msg').innerText = isSuspended
+                ? 'Access to this institute has been suspended by the Super Admin. Please contact them to restore access.'
+                : 'Your institute has been registered and is waiting for the Super Admin to approve it. You will be able to access the portal once it is approved.';
+            const icon = document.getElementById('pending-icon');
+            icon.className = isSuspended
+                ? 'fa-solid fa-ban text-3xl text-red-500'
+                : 'fa-solid fa-hourglass-half text-3xl text-amber-500';
+        }
+
+        async function refreshPendingStatus() {
+            const { data: { session } } = await sb.auth.getSession();
+            await route(session);
         }
 
         async function loadInstituteApp() {
             populateClassDropdowns();
 
-            const { data: inst } = await sb.from('institutes')
-                .select('*').eq('id', currentProfile.institute_id).single();
-            currentInstitute = inst;
-            settings = instituteToSettings(inst);
+            if (!currentInstitute) {
+                const { data: inst } = await sb.from('institutes')
+                    .select('*').eq('id', currentProfile.institute_id).single();
+                currentInstitute = inst;
+            }
+            settings = instituteToSettings(currentInstitute);
 
             await loadStudents();
             loadSettingsForm();
@@ -749,14 +812,39 @@
         async function loadSuperAdmin() {
             const tbody = document.getElementById('sa-rows');
             const emptyEl = document.getElementById('sa-empty');
-            tbody.innerHTML = '<tr><td colspan="5" class="px-6 py-6 text-center text-slate-400">Loading...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" class="px-6 py-6 text-center text-slate-400">Loading...</td></tr>';
 
             const { data: insts, error } = await sb.from('institutes')
                 .select('*').order('created_at', { ascending: true });
-            if (error) { tbody.innerHTML = `<tr><td colspan="5" class="px-6 py-6 text-center text-red-500">${esc(error.message)}</td></tr>`; return; }
+            if (error) { tbody.innerHTML = `<tr><td colspan="6" class="px-6 py-6 text-center text-red-500">${esc(error.message)}</td></tr>`; return; }
 
             if (!insts || insts.length === 0) { tbody.innerHTML = ''; emptyEl.classList.remove('hidden'); return; }
             emptyEl.classList.add('hidden');
+
+            const badge = (status) => {
+                const map = {
+                    pending:   'text-amber-700 bg-amber-50 border-amber-200',
+                    active:    'text-emerald-700 bg-emerald-50 border-emerald-200',
+                    suspended: 'text-red-700 bg-red-50 border-red-200'
+                };
+                const cls = map[status] || 'text-slate-600 bg-slate-50 border-slate-200';
+                return `<span class="text-xs font-semibold px-2.5 py-1 rounded-full border ${cls}">${esc(status)}</span>`;
+            };
+
+            const actionButtons = (i) => {
+                let btns = '';
+                if (i.status !== 'active') {
+                    btns += `<button onclick="setInstituteStatus('${i.id}','active')"
+                        class="bg-emerald-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg cursor-pointer hover:bg-emerald-700">Approve</button>`;
+                }
+                if (i.status === 'active') {
+                    btns += `<button onclick="setInstituteStatus('${i.id}','suspended')"
+                        class="bg-red-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg cursor-pointer hover:bg-red-700">Suspend</button>`;
+                }
+                btns += `<button onclick="updateLimit('${i.id}')"
+                        class="bg-indigo-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg cursor-pointer hover:bg-indigo-700">Save limit</button>`;
+                return btns;
+            };
 
             // Count students per institute (head:true -> count only, no rows transferred).
             const rows = [];
@@ -767,18 +855,26 @@
                     <tr>
                         <td class="px-6 py-3 font-semibold text-slate-700">${esc(i.name)}</td>
                         <td class="px-6 py-3 text-slate-500">${esc(i.email)}</td>
+                        <td class="px-6 py-3 text-center">${badge(i.status)}</td>
                         <td class="px-6 py-3 text-center">${count || 0}</td>
                         <td class="px-6 py-3 text-center">
                             <input id="lim-${i.id}" type="number" min="0" value="${i.student_limit}"
-                                   class="w-24 text-center px-2 py-1 border border-slate-300 rounded-lg text-sm">
+                                   class="w-20 text-center px-2 py-1 border border-slate-300 rounded-lg text-sm">
                         </td>
-                        <td class="px-6 py-3 text-center">
-                            <button onclick="updateLimit('${i.id}')"
-                                    class="bg-indigo-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg cursor-pointer hover:bg-indigo-700">Save limit</button>
+                        <td class="px-6 py-3">
+                            <div class="flex items-center justify-center gap-2">${actionButtons(i)}</div>
                         </td>
                     </tr>`);
             }
             tbody.innerHTML = rows.join('');
+        }
+
+        async function setInstituteStatus(instId, status) {
+            const verb = status === 'active' ? 'approve' : 'suspend';
+            if (!confirm(`Are you sure you want to ${verb} this institute?`)) return;
+            const { error } = await sb.from('institutes').update({ status }).eq('id', instId);
+            if (error) { alert('Update failed: ' + error.message); return; }
+            await loadSuperAdmin();
         }
 
         async function updateLimit(instId) {
@@ -911,6 +1007,8 @@
             if (error) {
                 if (String(error.message).includes('STUDENT_LIMIT_REACHED')) {
                     alert(`Student limit reached (${students.length}/${currentInstitute.student_limit}).\n\nPlease contact the Super Admin to increase your institute's student limit.`);
+                } else if (String(error.message).includes('INSTITUTE_NOT_APPROVED')) {
+                    alert('This institute is not approved (or has been suspended). Please contact the Super Admin.');
                 } else {
                     alert('Could not save student: ' + error.message);
                 }
