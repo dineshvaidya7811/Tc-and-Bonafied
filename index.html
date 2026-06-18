@@ -651,6 +651,8 @@
         }
 
         // Create the institute + profile rows on first successful login if they don't exist yet.
+        // Uses a SECURITY DEFINER database function (bootstrap_institute) that creates both rows
+        // atomically on the server, avoiding the RLS chicken-and-egg problem of inserting from the client.
         async function ensureBootstrap() {
             const { data: { user } } = await sb.auth.getUser();
             if (!user) return;
@@ -664,19 +666,15 @@
                 email: user.email, student_limit: 100
             };
 
-            // 1. create institute owned by this user
-            const { data: inst, error: instErr } = await sb.from('institutes')
-                .insert({
-                    owner_id: user.id, name: pending.name, sanstha: pending.sanstha,
-                    address: pending.address, district: pending.district, email: pending.email,
-                    student_limit: pending.student_limit
-                }).select().single();
-            if (instErr) { console.error(instErr); alert('Could not create institute: ' + instErr.message); return; }
-
-            // 2. create profile linking user -> institute
-            const { error: profErr } = await sb.from('profiles')
-                .insert({ id: user.id, institute_id: inst.id, role: 'institute_admin', email: user.email });
-            if (profErr) { console.error(profErr); alert('Could not create profile: ' + profErr.message); return; }
+            const { error } = await sb.rpc('bootstrap_institute', {
+                p_name: pending.name,
+                p_sanstha: pending.sanstha,
+                p_address: pending.address,
+                p_district: pending.district,
+                p_email: pending.email || user.email,
+                p_student_limit: pending.student_limit
+            });
+            if (error) { console.error(error); alert('Could not create institute: ' + error.message); return; }
 
             localStorage.removeItem('pending_institute');
         }
