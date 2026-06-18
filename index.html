@@ -573,10 +573,10 @@
             const password = document.getElementById('si-pass').value;
             if (!email || !password) { showAuthMsg('error', 'Enter your email and password.'); return; }
             btn.disabled = true; btn.textContent = 'Signing in...';
-            const { error } = await sb.auth.signInWithPassword({ email, password });
+            const { data, error } = await sb.auth.signInWithPassword({ email, password });
             btn.disabled = false; btn.textContent = 'Sign in';
             if (error) { showAuthMsg('error', error.message); return; }
-            // onAuthStateChange handles routing.
+            await route(data.session);
         }
 
         async function doRegister() {
@@ -691,7 +691,17 @@
 
             const { data: prof, error } = await sb.from('profiles')
                 .select('*').eq('id', session.user.id).maybeSingle();
-            if (error || !prof) { showScreen('auth-screen'); showAuthView('signin'); return; }
+            if (error) {
+                showScreen('auth-screen'); showAuthView('signin');
+                showAuthMsg('error', 'Signed in, but could not read the database: ' + error.message +
+                    '  — Did you run supabase_setup.sql in the Supabase SQL Editor?');
+                return;
+            }
+            if (!prof) {
+                showScreen('auth-screen'); showAuthView('signin');
+                showAuthMsg('error', 'Signed in, but no institute profile was found for this account. Register again, or check the database setup.');
+                return;
+            }
             currentProfile = prof;
 
             if (prof.role === 'super_admin') {
